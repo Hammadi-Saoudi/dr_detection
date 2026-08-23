@@ -1,15 +1,14 @@
-# Données (trop volumineuses pour Git)
+# Données et checkpoints (trop volumineux pour Git)
+aptos2019/
 data/
-EyeQ_repo/
-*.jpeg
-*.jpg
-*.png
-!checkpoints/confusion_matrix_test.png
-
-# Checkpoints modèles (souvent volumineux, > 50 Mo)
-checkpoints/*.pth
+checkpoints/
+results/
+pipeline_output/
 *.pth
 *.pt
+
+# Le SVM QuickQual (petit, mais mieux vaut le documenter que le committer en binaire)
+quickqual_dn121_512.pkl
 
 # Environnement Python
 venv/
@@ -17,7 +16,7 @@ __pycache__/
 *.pyc
 .ipynb_checkpoints/
 
-# Credentials (NE JAMAIS pousser ça sur GitHub)
+# Credentials
 kaggle.json
 *.env
 
