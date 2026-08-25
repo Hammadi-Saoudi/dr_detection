@@ -4,202 +4,207 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+import cv2
+import matplotlib.pyplot as plt
+import seaborn as sns
+from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 from torchvision import transforms, models
 from PIL import Image
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, cohen_kappa_score
 from tqdm import tqdm
 
-# --- FOCAL LOSS (Solution Avancée pour le Déséquilibre) ---
-class FocalLoss(nn.Module):
-    def __init__(self, gamma=2.0, alpha=None, reduction='mean'):
-        super(FocalLoss, self).__init__()
-        self.gamma = gamma
-        self.alpha = alpha # Optionnel: Poids supplémentaires
-        self.reduction = reduction
-
-    def forward(self, inputs, targets):
-        # 1. Calcul de l'entropie croisée classique
-        ce_loss = F.cross_entropy(inputs, targets, reduction='none')
-        # 2. Calcul de "pt" (Probabilité que le modèle avait raison)
-        pt = torch.exp(-ce_loss)
-        # 3. Formule du Focal Loss : (1 - pt)^gamma * CE_loss
-        # Plus l'image est facile (pt proche de 1), plus (1-pt) s'approche de 0 -> on l'ignore.
-        focal_loss = ((1 - pt) ** self.gamma) * ce_loss
-
-        if self.alpha is not None:
-            alpha_t = self.alpha.gather(0, targets)
-            focal_loss = focal_loss * alpha_t
-
-        if self.reduction == 'mean':
-            return focal_loss.mean()
+def crop_image_from_gray(img, tol=7):
+    if img.ndim == 2:
+        mask = img > tol
+        return img[np.ix_(mask.any(1),mask.any(0))]
+    elif img.ndim == 3:
+        gray_img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        mask = gray_img > tol
+        check_shape = img[:,:,0][np.ix_(mask.any(1),mask.any(0))].shape[0]
+        if (check_shape == 0): return img 
         else:
-            return focal_loss.sum()
+            img1 = img[:,:,0][np.ix_(mask.any(1),mask.any(0))]
+            img2 = img[:,:,1][np.ix_(mask.any(1),mask.any(0))]
+            img3 = img[:,:,2][np.ix_(mask.any(1),mask.any(0))]
+            img = np.stack([img1,img2,img3],axis=-1)
+        return img
 
-# --- 1. DATASET ---
 class APTOSDataset(Dataset):
     def __init__(self, dataframe, image_dir, transform=None):
-        self.dataframe = dataframe
+        self.dataframe = dataframe.reset_index(drop=True)
         self.image_dir = image_dir
         self.transform = transform
-
-    def __len__(self):
-        return len(self.dataframe)
-
+    def __len__(self): return len(self.dataframe)
     def __getitem__(self, idx):
         img_name = f"{self.dataframe.iloc[idx, 0]}.png"
         img_path = os.path.join(self.image_dir, img_name)
-        image = Image.open(img_path).convert('RGB')
+        image_cv = cv2.imread(img_path)
+        image_cv = cv2.cvtColor(image_cv, cv2.COLOR_BGR2RGB)
+        image_cv = crop_image_from_gray(image_cv)
+        image = Image.fromarray(image_cv)
         label = int(self.dataframe.iloc[idx, 1])
-        if self.transform:
-            image = self.transform(image)
+        if self.transform: image = self.transform(image)
         return image, torch.tensor(label, dtype=torch.long)
 
-# --- 2. ENTRAÎNEMENT ET ÉVALUATION ---
+def plot_confusion_matrix(cm, title, filename):
+    plt.figure(figsize=(6,5))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', cbar=False)
+    plt.title(title)
+    plt.ylabel('Vraie Classe')
+    plt.xlabel('Prédiction')
+    plt.tight_layout()
+    plt.savefig(filename)
+    plt.close()
+
 def main():
-    print("--- Configuration de l'entraînement avec FOCAL LOSS ---")
+    print("--- CHALLENGE ACCEPTÉ : LE MODÈLE ULTIME (AVEC COURBES) ---")
+    BATCH_SIZE = 12 
+    EPOCHS = 20
     
-    # Paramètres
-    BATCH_SIZE = 16
-    EPOCHS = 15 # On augmente un peu car le Focal Loss apprend plus prudemment
-    LEARNING_RATE = 1e-4
-    
-    # NOUVEAUX CHEMINS (Sur le Bureau, en dehors du dossier de travail)
     DESKTOP_PATH = r'C:\Users\Saoudi\OneDrive\Desktop\aptos2019-blindness-detection'
     IMAGE_DIR = os.path.join(DESKTOP_PATH, 'train_images_enhanced')
     CSV_PATH = os.path.join(DESKTOP_PATH, 'train.csv')
     
-    if not os.path.exists(IMAGE_DIR):
-        print(f"ERREUR FATALE: Le dossier {IMAGE_DIR} n'existe pas.")
-        print("Veuillez d'abord exécuter 'preprocess_all.py' pour créer les images améliorées sur le bureau.")
-        return
-
+    os.makedirs('courbes_entrainement', exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Entraînement sur : {device}")
     
-    # Lecture des données
     df = pd.read_csv(CSV_PATH)
-    
-    # SPLIT : Train(70%), Val(15%), Test(15%)
     train_df, temp_df = train_test_split(df, test_size=0.30, random_state=42, stratify=df['diagnosis'])
     val_df, test_df = train_test_split(temp_df, test_size=0.50, random_state=42, stratify=temp_df['diagnosis'])
-    
-    print(f"Images d'entraînement : {len(train_df)}")
-    print(f"Images de validation : {len(val_df)}")
-    print(f"Images de test : {len(test_df)}")
 
-    # Transformations
+    class_counts = train_df['diagnosis'].value_counts().sort_index().values
+    class_weights = 1.0 / class_counts
+    sample_weights = [class_weights[label] for label in train_df['diagnosis']]
+    sampler = WeightedRandomSampler(weights=sample_weights, num_samples=len(sample_weights), replacement=True)
+
     train_transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomVerticalFlip(),
-        transforms.RandomRotation(15),
+        transforms.Resize((256, 256)), 
+        transforms.RandomHorizontalFlip(), transforms.RandomVerticalFlip(),
+        transforms.RandomRotation(90),
+        transforms.ColorJitter(brightness=0.15, contrast=0.15, saturation=0.15),
         transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
     val_test_transform = transforms.Compose([
-        transforms.Resize((224, 224)),
+        transforms.Resize((256, 256)),
         transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
 
-    # DataLoaders
-    train_loader = DataLoader(APTOSDataset(train_df, IMAGE_DIR, train_transform), batch_size=BATCH_SIZE, shuffle=True)
+    train_loader = DataLoader(APTOSDataset(train_df, IMAGE_DIR, train_transform), batch_size=BATCH_SIZE, sampler=sampler)
     val_loader = DataLoader(APTOSDataset(val_df, IMAGE_DIR, val_test_transform), batch_size=BATCH_SIZE, shuffle=False)
     test_loader = DataLoader(APTOSDataset(test_df, IMAGE_DIR, val_test_transform), batch_size=BATCH_SIZE, shuffle=False)
 
-    # Modèle ResNet50
-    model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
-    model.fc = nn.Linear(model.fc.in_features, 5)
+    model = models.efficientnet_b3(weights=models.EfficientNet_B3_Weights.IMAGENET1K_V1)
+    model.classifier[1] = nn.Linear(model.classifier[1].in_features, 5)
     model = model.to(device)
 
-    # --- CHANGEMENT MAJEUR : FOCAL LOSS ---
-    # Remplacement de CrossEntropyLoss par FocalLoss avec gamma=2.0 (le standard optimal)
-    criterion = FocalLoss(gamma=2.0)
-    
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+    optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-2)
+    scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=1e-3, steps_per_epoch=len(train_loader), epochs=EPOCHS)
 
-    print("\n--- DÉBUT DE LA BOUCLE D'ENTRAÎNEMENT ---")
-    best_kappa = -1.0
+    # --- Historique pour les courbes ---
+    history = {'train_loss': [], 'val_acc': [], 'val_kappa': []}
+    best_val_acc = -1.0
     
     for epoch in range(EPOCHS):
         print(f"\nÉpoque {epoch+1}/{EPOCHS}")
-        
-        # --- Mode Entraînement ---
         model.train()
         running_loss = 0.0
-        
         for inputs, labels in tqdm(train_loader, desc="Entraînement"):
             inputs, labels = inputs.to(device), labels.to(device)
-            
             optimizer.zero_grad()
             outputs = model(inputs)
             loss = criterion(outputs, labels)
             loss.backward()
             optimizer.step()
-            
+            scheduler.step()
             running_loss += loss.item()
             
-        print(f"Perte (Focal Loss) moyenne : {running_loss/len(train_loader):.4f}")
-        
-        # --- Mode Validation ---
+        epoch_loss = running_loss / len(train_loader)
+        history['train_loss'].append(epoch_loss)
+            
         model.eval()
-        val_preds = []
-        val_labels = []
-        
+        val_preds, val_labels = [], []
         with torch.no_grad():
-            for inputs, labels in tqdm(val_loader, desc="Validation"):
+            for inputs, labels in val_loader:
                 inputs, labels = inputs.to(device), labels.to(device)
                 outputs = model(inputs)
-                _, predicted = outputs.max(1)
-                
-                val_preds.extend(predicted.cpu().numpy())
+                _, preds = outputs.max(1)
+                val_preds.extend(preds.cpu().numpy())
                 val_labels.extend(labels.cpu().numpy())
-                
-        # Calcul du Kappa
-        val_kappa = cohen_kappa_score(val_labels, val_preds, weights='quadratic')
-        val_acc = accuracy_score(val_labels, val_preds)
         
-        print(f"Validation - Accuracy: {val_acc:.4f} | Kappa Score: {val_kappa:.4f}")
+        acc = accuracy_score(val_labels, val_preds)
+        kappa = cohen_kappa_score(val_labels, val_preds, weights='quadratic')
+        history['val_acc'].append(acc)
+        history['val_kappa'].append(kappa)
         
-        # Sauvegarde
-        if val_kappa > best_kappa:
-            best_kappa = val_kappa
+        print(f"Perte: {epoch_loss:.4f} | Val Accuracy: {acc:.4f} | Val Kappa: {kappa:.4f}")
+        
+        if acc > best_val_acc:
+            best_val_acc = acc
             torch.save(model.state_dict(), 'best_dr_model.pth')
-            print(">>> Nouveau meilleur modèle sauvegardé ! (best_dr_model.pth)")
+            print(">>> Nouveau meilleur modèle sauvegardé !")
 
-    # --- 3. ÉVALUATION FINALE SUR LE SET DE TEST ---
-    print("\n--- ÉVALUATION FINALE SUR LE TEST SET ---")
-    model.load_state_dict(torch.load('best_dr_model.pth'))
+    # --- SAUVEGARDE DES COURBES D'ENTRAÎNEMENT ---
+    print("\nGénération des courbes d'entraînement...")
+    epochs_range = range(1, EPOCHS + 1)
+    plt.figure(figsize=(12, 5))
+    
+    plt.subplot(1, 2, 1)
+    plt.plot(epochs_range, history['train_loss'], label='Train Loss', color='red', marker='o')
+    plt.title('Évolution de la Perte (Label Smoothing)')
+    plt.xlabel('Époques')
+    plt.ylabel('Loss')
+    plt.grid(True)
+    
+    plt.subplot(1, 2, 2)
+    plt.plot(epochs_range, history['val_acc'], label='Validation Accuracy', color='blue', marker='x')
+    plt.plot(epochs_range, history['val_kappa'], label='Validation QWK', color='green', marker='s')
+    plt.title('Évolution des Performances (Validation)')
+    plt.xlabel('Époques')
+    plt.ylabel('Score')
+    plt.legend()
+    plt.grid(True)
+    
+    plt.tight_layout()
+    plt.savefig('courbes_entrainement/courbe_ultime.png')
+
+    # --- ÉVALUATION FINALE AVEC TTA ---
+    print("\n--- ÉVALUATION AVEC TTA (Test-Time Augmentation) ---")
+    model.load_state_dict(torch.load('best_dr_model.pth', weights_only=True))
     model.eval()
     
-    all_preds = []
-    all_labels = []
-    
+    all_preds, all_labels = [], []
     with torch.no_grad():
-        for inputs, labels in tqdm(test_loader, desc="Test Final"):
+        for inputs, labels in tqdm(test_loader, desc="Test Final avec TTA"):
             inputs, labels = inputs.to(device), labels.to(device)
-            outputs = model(inputs)
-            _, predicted = outputs.max(1)
+            out1 = model(inputs)
+            out2 = model(torch.flip(inputs, [3]))
+            out3 = model(torch.flip(inputs, [2]))
+            final_out = (out1 + out2 + out3) / 3.0
+            
+            _, predicted = final_out.max(1)
             all_preds.extend(predicted.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
             
-    # Calcul des métriques
+    # --- SAUVEGARDE DES RÉSULTATS DE TEST ---
     acc = accuracy_score(all_labels, all_preds)
     kappa = cohen_kappa_score(all_labels, all_preds, weights='quadratic')
     
-    print("\n================ RÉSULTATS FINAUX (AVEC FOCAL LOSS) ================")
-    print(f"Exactitude (Accuracy) globale : {acc:.4f}")
-    print(f"Quadratic Weighted Kappa (QWK) : {kappa:.4f}")
+    with open('courbes_entrainement/rapport_test_ultime.txt', 'w') as f:
+        f.write("================ RÉSULTATS DU CHALLENGE ================\n")
+        f.write(f"Exactitude Globale : {acc:.4f}\n")
+        f.write(f"QWK : {kappa:.4f}\n\n")
+        f.write("Rapport de Classification :\n")
+        f.write(classification_report(all_labels, all_preds, target_names=['0', '1', '2', '3', '4']))
+        f.write("\n========================================================\n")
+        
+    cm = confusion_matrix(all_labels, all_preds)
+    plot_confusion_matrix(cm, "Matrice de Confusion Ultime", "courbes_entrainement/cm_ultime.png")
     
-    print("\nRapport de Classification (Précision, Rappel, F1 par classe) :")
-    print(classification_report(all_labels, all_preds, target_names=['0 (Sain)', '1 (Léger)', '2 (Modéré)', '3 (Sévère)', '4 (Prolifératif)']))
-    
-    print("\nMatrice de Confusion :")
-    print(confusion_matrix(all_labels, all_preds))
-    print("====================================================================")
+    print("\n[OK] Les graphiques, la matrice et le rapport texte ont ete sauvegardes dans 'courbes_entrainement/'")
 
 if __name__ == "__main__":
     main()

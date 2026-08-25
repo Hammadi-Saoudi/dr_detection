@@ -1,0 +1,18 @@
+================ RÉSULTATS DU CHALLENGE ================
+Exactitude Globale : 0.8455
+QWK : 0.9034
+
+Rapport de Classification :
+              precision    recall  f1-score   support
+
+           0       0.97      0.97      0.97       271
+           1       0.59      0.54      0.56        56
+           2       0.76      0.86      0.81       150
+           3       0.68      0.52      0.59        29
+           4       0.73      0.61      0.67        44
+
+    accuracy                           0.85       550
+   macro avg       0.75      0.70      0.72       550
+weighted avg       0.84      0.85      0.84       550
+
+========================================================
