@@ -1,0 +1,38 @@
+ETAPE 4 v2 - GRAD-CAM++ MULTI-COUCHES
+============================================================
+
+Image : 3486f7096276
+  Grade reel    : 0 - Grade 0 : Sain
+  Grade predit  : 0 - Grade 0 : Sain
+  Confiance     : 81.17%
+  Zones detectees : 4
+  Statut        : CORRECT
+----------------------------------------
+Image : 9eaf735cf01f
+  Grade reel    : 1 - Grade 1 : RD Legere
+  Grade predit  : 2 - Grade 2 : RD Moderee
+  Confiance     : 93.43%
+  Zones detectees : 3
+  Statut        : INCORRECT
+----------------------------------------
+Image : a150ff5dfe07
+  Grade reel    : 2 - Grade 2 : RD Moderee
+  Grade predit  : 2 - Grade 2 : RD Moderee
+  Confiance     : 57.63%
+  Zones detectees : 5
+  Statut        : CORRECT
+----------------------------------------
+Image : aba3063c5413
+  Grade reel    : 3 - Grade 3 : RD Severe
+  Grade predit  : 2 - Grade 2 : RD Moderee
+  Confiance     : 78.41%
+  Zones detectees : 5
+  Statut        : INCORRECT
+----------------------------------------
+Image : 7c90ab025331
+  Grade reel    : 4 - Grade 4 : RD Proliferative
+  Grade predit  : 4 - Grade 4 : RD Proliferative
+  Confiance     : 50.32%
+  Zones detectees : 4
+  Statut        : CORRECT
+----------------------------------------
