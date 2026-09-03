@@ -67,7 +67,7 @@ def crop_image_from_gray(img, tol=7):
     return np.stack([img[:, :, c][np.ix_(mask.any(1), mask.any(0))] for c in range(3)], axis=-1)
 
 
-def load_image(img_path, size=256):
+def load_image(img_path, size=512):
     img_cv = cv2.imread(img_path)
     img_cv = cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)
     img_cv = crop_image_from_gray(img_cv)
@@ -91,9 +91,18 @@ def predict(model, tensor, device):
     return int(np.argmax(probs)), probs
 
 
-def apply_otsu_threshold(cam_map):
-    cam_uint8 = (cam_map * 255).astype(np.uint8)
-    _, binary = cv2.threshold(cam_uint8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+def apply_otsu_threshold(cam_map, percentile=60):
+    """
+    Seuillage par percentile : ne garde que les top (100-percentile)% activations.
+    Plus robuste qu'OTSU car adapte aux images avec peu ou beaucoup de lesions.
+    """
+    threshold = np.percentile(cam_map, percentile)
+    binary    = (cam_map >= threshold).astype(np.uint8) * 255
+    
+    # Morphologie : fermeture pour combler les trous dans les lesions
+    kernel    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    binary    = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+    
     cam_clean = cam_map.copy()
     cam_clean[binary == 0] = 0.0
     return cam_clean, binary
@@ -101,13 +110,18 @@ def apply_otsu_threshold(cam_map):
 
 def draw_lesion_contours(rgb_display, binary_mask):
     contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    overlay = (rgb_display * 255).astype(np.uint8).copy()
-    big_contours = [c for c in contours if cv2.contourArea(c) > 50]
+    overlay      = (rgb_display * 255).astype(np.uint8).copy()
+    big_contours = [c for c in contours if cv2.contourArea(c) > 30]
     cv2.drawContours(overlay, big_contours, -1, (255, 255, 255), 2)
     return overlay.astype(np.float32) / 255.0, len(big_contours)
 
 
 def multi_layer_cam(model, tensor, target_layers, target_class, device, method='gradcam++'):
+    """
+    Calcule une carte CAM multi-couches en prenant le MAXIMUM pixel-a-pixel
+    (au lieu d'une moyenne ponderee) pour capturer toutes les zones de lesions,
+    meme celles visibles dans une seule couche.
+    """
     tensor = tensor.to(device)
     maps   = []
     for layer in target_layers:
@@ -115,18 +129,22 @@ def multi_layer_cam(model, tensor, target_layers, target_class, device, method='
             cam_obj = GradCAMPlusPlus(model=model, target_layers=[layer])
         else:
             cam_obj = EigenCAM(model=model, target_layers=[layer])
-        targets    = [ClassifierOutputTarget(target_class)]
-        grayscale  = cam_obj(input_tensor=tensor, targets=targets)[0]
+        targets   = [ClassifierOutputTarget(target_class)]
+        grayscale = cam_obj(input_tensor=tensor, targets=targets)[0]
         if grayscale.max() > 0:
             grayscale = grayscale / grayscale.max()
         maps.append(grayscale)
 
-    weights = np.array([0.20, 0.35, 0.45])[:len(maps)]
-    weights /= weights.sum()
-    fused = sum(w * m for w, m in zip(weights, maps))
+    # MAX pixel-a-pixel : on garde la detection la plus forte de n'importe quelle couche
+    fused = np.maximum.reduce(maps)
+    
+    # Lissage gaussien leger pour reduire le bruit sans perdre les bords
+    fused = cv2.GaussianBlur(fused, (5, 5), sigmaX=1.0)
+    
     if fused.max() > 0:
         fused = fused / fused.max()
     return fused
+
 
 
 # ==========================================================
@@ -142,9 +160,12 @@ def create_figure(rgb, cam_gradcam, cam_eigen, binary_mask,
     pred_color   = GRADE_COLORS[pred_class]
     true_color   = GRADE_COLORS[true_class]
 
-    overlay_gradcam = show_cam_on_image(rgb, cam_gradcam, use_rgb=True)
-    overlay_clean   = show_cam_on_image(rgb, cam_gradcam * (binary_mask / 255.0), use_rgb=True)
-    overlay_eigen   = show_cam_on_image(rgb, cam_eigen,   use_rgb=True)
+    overlay_gradcam = show_cam_on_image(rgb, cam_gradcam, use_rgb=True,
+                                         colormap=cv2.COLORMAP_TURBO, image_weight=0.5)
+    overlay_clean   = show_cam_on_image(rgb, cam_gradcam * (binary_mask / 255.0), use_rgb=True,
+                                         colormap=cv2.COLORMAP_TURBO, image_weight=0.45)
+    overlay_eigen   = show_cam_on_image(rgb, cam_eigen, use_rgb=True,
+                                         colormap=cv2.COLORMAP_TURBO, image_weight=0.5)
 
     fig, axes = plt.subplots(2, 3, figsize=(22, 12))
     fig.patch.set_facecolor('#0f0f1a')
